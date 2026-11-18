@@ -3,6 +3,7 @@ package it.unitn.ds;
 import akka.actor.ActorRef;
 import akka.actor.Props;
 
+import java.io.Serializable;
 import java.util.Optional;
 
 public class Client extends AbstractClient {
@@ -20,9 +21,20 @@ public class Client extends AbstractClient {
         return Props.create(Client.class, () -> new Client(readTimeoutDelay, writeTimeoutDelay, defaultTargetReplica, Optional.ofNullable(listener)));
     }
 
+    // TODO: check if this message definition is right or something
+    public static class SendReadMessage implements Serializable{
+        public final ActorRef replica;
+        public final int index;
+
+        public SendReadMessage(ActorRef replica, int index){
+            this.replica = replica;
+            this.index = index;
+        }
+    }
+
     @Override
     public void sendRead(ActorRef replica, int index) {
-        // TODO: implement        
+        // TODO: implement
     }
 
     @Override
