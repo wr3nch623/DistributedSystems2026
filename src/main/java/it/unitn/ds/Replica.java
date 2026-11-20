@@ -197,7 +197,7 @@ public class Replica extends AbstractReplica {
     }
 
     // Gets the next id in the list of alive replicas
-    private Integer nextIdInList(int currentID) {
+    private Integer nextAliveIdInList(int currentID) {
         Integer nextId = this.aliveGroup.higherKey(currentID);
 
         return nextId != null ? nextId : this.aliveGroup.firstKey();
@@ -211,6 +211,11 @@ public class Replica extends AbstractReplica {
         }
 
         if (this.coordinatorHeartbeatTimer != null) {
+            this.coordinatorHeartbeatTimer.cancel();
+            this.coordinatorHeartbeatTimer = null;
+        }
+
+        if (this.replicaElectionAwaitACKTimer != null) {
             this.coordinatorHeartbeatTimer.cancel();
             this.coordinatorHeartbeatTimer = null;
         }
@@ -235,7 +240,7 @@ public class Replica extends AbstractReplica {
             // send election start message or election
             TreeMap<Integer, ActorRef> aliveNodes = list.aliveNodes;
             aliveNodes.put(this.id, this.initialGroup.get(this.id));
-            nextID = nextIdInList(this.id);
+            nextID = nextAliveIdInList(this.id);
             if (nextID == -1) {
                 log(String.format("REPLICA %d, ERROR: nextID not found in aliveGROUP\n", this.id));
             }
@@ -243,7 +248,7 @@ public class Replica extends AbstractReplica {
             this.replicaElectionAwaitACKTimer = getContext().getSystem().scheduler().scheduleOnce(
                     Duration.create(4L * getMaxLatency(), TimeUnit.MILLISECONDS),
                     getSelf(),
-                    new ElectionFailed((this.id + 1) % this.originalN, this.seqnum, message),
+                    new ElectionFailed(nextID, this.seqnum, message),
                     getContext().getSystem().getDispatcher(),
                     getSelf());
 
@@ -255,12 +260,12 @@ public class Replica extends AbstractReplica {
             // TODO: remember to reinstantiate all clocks in the next message
 
             // Create the end election message with the new list and the new
-            nextID = nextIdInList(this.id);
+            nextID = nextAliveIdInList(this.id);
             EndElectionProcess finalMessage = new EndElectionProcess(list.seqNum, nextID, this.aliveGroup);
             this.replicaElectionAwaitACKTimer = getContext().getSystem().scheduler().scheduleOnce(
                     Duration.create(4L * getMaxLatency(), TimeUnit.MILLISECONDS),
                     getSelf(),
-                    new EndElectionFailed((this.id + 1) % this.originalN, this.seqnum, finalMessage),
+                    new EndElectionFailed(nextID, this.seqnum, finalMessage),
                     getContext().getSystem().getDispatcher(),
                     getSelf());
 
@@ -276,11 +281,24 @@ public class Replica extends AbstractReplica {
          * I get the failed message, so i resend it
          * 
          */
+        int nextID = -1;
 
         if (this.replicaElectionAwaitACKTimer != null) {
             this.replicaElectionAwaitACKTimer.cancel();
             this.replicaElectionAwaitACKTimer = null;
         }
+
+        // Create the end election message with the new list and the new
+        nextID = nextAliveIdInList(fail.targetID);
+
+        this.replicaElectionAwaitACKTimer = getContext().getSystem().scheduler().scheduleOnce(
+                Duration.create(4L * getMaxLatency(), TimeUnit.MILLISECONDS),
+                getSelf(),
+                new ElectionFailed(nextID, this.seqnum, fail.list),
+                getContext().getSystem().getDispatcher(),
+                getSelf());
+
+        tell(fail.list, this.initialGroup.get(nextID));
 
     }
 
@@ -332,9 +350,10 @@ public class Replica extends AbstractReplica {
         this.coordinatorID = sysInit.coordinator_id;
         seqnum = 0;
 
-        if (this.coordinatorID == this.id)
-            ;
-        // TODO: Start coordinator heartbeat
+        if (this.coordinatorID == this.id) {
+            // TODO: Start coordinator heartbeat
+
+        }
 
         // TODO: start replica heartbeat to check for other replicas.
 
