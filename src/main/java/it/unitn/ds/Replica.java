@@ -92,7 +92,7 @@ public class Replica extends AbstractReplica {
     @Override
     public int getSystemNumberOfActors() {
         // TODO: implement
-        return this.n;
+        return this.aliveGroup.size();
     }
 
     //
@@ -111,6 +111,13 @@ public class Replica extends AbstractReplica {
         }
     }
 
+    public void onHeartbeat(Heartbeat a) {
+        // need to reset heartbeat timer
+
+        resetWatchdogTimer();
+        // TODO: add reinitialization of heartbeat timer
+    }
+
     // TODO: implements send election data to next hop and election ack as answer
     // TODO: Implement also the logic behind those two things
     public static final class SendElectionList implements Serializable {
@@ -123,101 +130,6 @@ public class Replica extends AbstractReplica {
             this.initiator = initiator;
             this.aliveNodes.putAll(aliveNodes);
             this.seqNum = seqnum;
-        }
-
-    }
-
-    public static final class ElectionACK implements Serializable {
-    }
-
-    /*
-     * In case there is a problem with the election message that does not reach the
-     * replica cause its dead
-     * i send myself the reminder that something is not working
-     * I also save the list of host that has been sent so that i can modify the
-     * message and send it directly
-     * by changing the targetID and resending everything
-     * 
-     */
-    public static final class ElectionFailed implements Serializable {
-        public int targetID;
-        public int seqNum;
-        public SendElectionList list;
-
-        public ElectionFailed(int targetID, int seqNum, SendElectionList list) {
-            this.targetID = targetID;
-            this.seqNum = seqNum;
-            this.list = list;
-        }
-    }
-
-    // Answer from a note to determine if it is down or no. This should be good i
-    // guess
-    public static final class HeartbeatAnswer implements Serializable {
-    }
-
-    // On receive of ElectionACK from next replica i must not do anything cause the
-    // message was successfully received
-    // thus just cancel my timer for the recovery and await the coordinator message
-    // that bullies everyone
-    // into accepting the new one
-    public void onElectionACK(ElectionACK e) {
-        this.replicaElectionAwaitACKTimer.cancel();
-        this.replicaElectionAwaitACKTimer = null;
-
-    }
-
-    // NOTE: This is probably useless since having a message that starts the
-    // election process is redundant
-    public static final class StartElectionProcess implements Serializable {
-    }
-
-    public static final class EndElectionProcess implements Serializable {
-        public int seqNum;
-        public int newCoordinatorId;
-        public TreeMap<Integer, ActorRef> newAliveGroup;
-
-        public EndElectionProcess(int seqNum, int newCoordinatorId, TreeMap<Integer, ActorRef> newAliveGroup) {
-            this.seqNum = seqNum;
-            this.newCoordinatorId = newCoordinatorId;
-            this.newAliveGroup = newAliveGroup;
-        }
-    }
-
-    public static final class EndElectionFailed implements Serializable {
-        public int targetID;
-        public int seqNum;
-        public EndElectionProcess list;
-
-        public EndElectionFailed(int targetID, int seqNum, EndElectionProcess list) {
-            this.targetID = targetID;
-            this.seqNum = seqNum;
-            this.list = list;
-        }
-    }
-
-    // Gets the next id in the list of alive replicas
-    private Integer nextAliveIdInList(int currentID) {
-        Integer nextId = this.aliveGroup.higherKey(currentID);
-
-        return nextId != null ? nextId : this.aliveGroup.firstKey();
-
-    }
-
-    private void resetAllClocks() {
-        if (this.watchdogTimer != null) {
-            this.watchdogTimer.cancel();
-            this.watchdogTimer = null;
-        }
-
-        if (this.coordinatorHeartbeatTimer != null) {
-            this.coordinatorHeartbeatTimer.cancel();
-            this.coordinatorHeartbeatTimer = null;
-        }
-
-        if (this.replicaElectionAwaitACKTimer != null) {
-            this.coordinatorHeartbeatTimer.cancel();
-            this.coordinatorHeartbeatTimer = null;
         }
 
     }
@@ -261,7 +173,7 @@ public class Replica extends AbstractReplica {
 
             // Create the end election message with the new list and the new
             nextID = nextAliveIdInList(this.id);
-            EndElectionProcess finalMessage = new EndElectionProcess(list.seqNum, nextID, this.aliveGroup);
+            EndElectionProcess finalMessage = new EndElectionProcess(list.seqNum, this.id, nextID, this.aliveGroup);
             this.replicaElectionAwaitACKTimer = getContext().getSystem().scheduler().scheduleOnce(
                     Duration.create(4L * getMaxLatency(), TimeUnit.MILLISECONDS),
                     getSelf(),
@@ -275,6 +187,30 @@ public class Replica extends AbstractReplica {
 
     }
 
+    public static final class ElectionACK implements Serializable {
+    }
+
+    /*
+     * In case there is a problem with the election message that does not reach the
+     * replica cause its dead
+     * i send myself the reminder that something is not working
+     * I also save the list of host that has been sent so that i can modify the
+     * message and send it directly
+     * by changing the targetID and resending everything
+     * 
+     */
+    public static final class ElectionFailed implements Serializable {
+        public int targetID;
+        public int seqNum;
+        public SendElectionList list;
+
+        public ElectionFailed(int targetID, int seqNum, SendElectionList list) {
+            this.targetID = targetID;
+            this.seqNum = seqNum;
+            this.list = list;
+        }
+    }
+
     // TODO: need to implement all the callbacks that are required by the project
     public void onFailedACK(ElectionFailed fail) {
         /*
@@ -283,10 +219,7 @@ public class Replica extends AbstractReplica {
          */
         int nextID = -1;
 
-        if (this.replicaElectionAwaitACKTimer != null) {
-            this.replicaElectionAwaitACKTimer.cancel();
-            this.replicaElectionAwaitACKTimer = null;
-        }
+        resetReplicaACKTimer();
 
         // Create the end election message with the new list and the new
         nextID = nextAliveIdInList(fail.targetID);
@@ -300,6 +233,139 @@ public class Replica extends AbstractReplica {
 
         tell(fail.list, this.initialGroup.get(nextID));
 
+    }
+
+    // Answer from a note to determine if it is down or no. This should be good i
+    // guess
+    public static final class HeartbeatAnswer implements Serializable {
+    }
+
+    // On receive of ElectionACK from next replica i must not do anything cause the
+    // message was successfully received
+    // thus just cancel my timer for the recovery and await the coordinator message
+    // that bullies everyone
+    // into accepting the new one
+    public void onElectionACK(ElectionACK e) {
+        resetReplicaACKTimer();
+
+    }
+
+    public static final class EndElectionProcess implements Serializable {
+        public int seqNum;
+        public int initiator;
+        public int newCoordinatorId;
+        public TreeMap<Integer, ActorRef> newAliveGroup;
+
+        public EndElectionProcess(int seqNum, int initiator, int newCoordinatorId,
+                TreeMap<Integer, ActorRef> newAliveGroup) {
+            this.seqNum = seqNum;
+            this.newCoordinatorId = newCoordinatorId;
+            this.newAliveGroup = newAliveGroup;
+            this.initiator = initiator;
+        }
+    }
+
+    public void onEndElectionProcess(EndElectionProcess p) {
+        int nextID = -1;
+        if (p.initiator != this.id) {
+            this.aliveGroup = p.newAliveGroup;
+            this.coordinatorID = p.newCoordinatorId;
+
+            EndElectionProcess newMessage = new EndElectionProcess(p.seqNum, p.initiator, p.newCoordinatorId,
+                    p.newAliveGroup);
+
+            nextID = nextAliveIdInList(this.id);
+            this.replicaElectionAwaitACKTimer = getContext().getSystem().scheduler().scheduleOnce(
+                    Duration.create(4L * getMaxLatency(), TimeUnit.MILLISECONDS),
+                    getSelf(),
+                    new EndElectionFailed(nextID, this.seqnum, newMessage),
+                    getContext().getSystem().getDispatcher(),
+                    getSelf());
+
+            tell(newMessage, this.initialGroup.get(nextID));
+
+        }
+    }
+
+    public static final class EndElectionFailed implements Serializable {
+        public int targetID;
+        public int seqNum;
+        public EndElectionProcess list;
+
+        public EndElectionFailed(int targetID, int seqNum, EndElectionProcess list) {
+            this.targetID = targetID;
+            this.seqNum = seqNum;
+            this.list = list;
+        }
+    }
+
+    public void onFailedEndElectionProcess(EndElectionFailed fail) {
+        int nextID = -1;
+
+        resetReplicaACKTimer();
+
+        nextID = nextAliveIdInList(fail.targetID);
+
+        EndElectionProcess newMessage = new EndElectionProcess(fail.list.seqNum, fail.list.initiator,
+                fail.list.newCoordinatorId,
+                fail.list.newAliveGroup);
+
+        this.replicaElectionAwaitACKTimer = getContext().getSystem().scheduler().scheduleOnce(
+                Duration.create(4L * getMaxLatency(), TimeUnit.MILLISECONDS),
+                getSelf(),
+                new EndElectionFailed(nextID, this.seqnum, newMessage),
+                getContext().getSystem().getDispatcher(),
+                getSelf());
+
+        tell(newMessage, this.initialGroup.get(nextID));
+
+    }
+
+    // Gets the next id in the list of alive replicas
+    private Integer nextAliveIdInList(int currentID) {
+        Integer nextId = this.aliveGroup.higherKey(currentID);
+
+        return nextId != null ? nextId : this.aliveGroup.firstKey();
+
+    }
+
+    private void resetCoordinatorHearbeatTimer() {
+        if (this.coordinatorHeartbeatTimer != null) {
+            this.coordinatorHeartbeatTimer.cancel();
+            this.coordinatorHeartbeatTimer = null;
+        }
+    }
+
+    private void resetWatchdogTimer() {
+        if (this.watchdogTimer != null) {
+            this.watchdogTimer.cancel();
+            this.watchdogTimer = null;
+        }
+    }
+
+    private void resetAllClocks() {
+        if (this.watchdogTimer != null) {
+            this.watchdogTimer.cancel();
+            this.watchdogTimer = null;
+        }
+
+        if (this.coordinatorHeartbeatTimer != null) {
+            this.coordinatorHeartbeatTimer.cancel();
+            this.coordinatorHeartbeatTimer = null;
+        }
+
+        if (this.replicaElectionAwaitACKTimer != null) {
+            this.coordinatorHeartbeatTimer.cancel();
+            this.coordinatorHeartbeatTimer = null;
+        }
+
+    }
+
+    void resetReplicaACKTimer() {
+        if (this.replicaElectionAwaitACKTimer != null) {
+            this.replicaElectionAwaitACKTimer.cancel();
+            this.replicaElectionAwaitACKTimer = null;
+        }
     }
 
     //
@@ -329,6 +395,22 @@ public class Replica extends AbstractReplica {
         // TODO: implement other types of crash inside other message receives.
 
     }
+
+    // public void sendMessageAndACK(int targetID, Object targetMessage, Object
+    // errorMessage){
+
+    // resetReplicaACKTimer();;
+
+    // this.replicaElectionAwaitACKTimer =
+    // getContext().getSystem().scheduler().scheduleOnce(
+    // Duration.create(4L * getMaxLatency(), TimeUnit.MILLISECONDS),
+    // getSelf(),
+    // errorMessage,
+    // getContext().getSystem().getDispatcher(),
+    // getSelf());
+
+    // tell((Serializable) targetMessage, this.initialGroup.get(targetID));
+    // }
 
     @Override
     public void initSystem(InitSystem sysInit) {
@@ -363,6 +445,14 @@ public class Replica extends AbstractReplica {
     public final Receive createReceive() {
         return createBaseReceiveBuilder()
                 // TODO add your message handlers here .match(, )
+                // heartbeat and elections
+                .match(ElectionACK.class, this::onElectionACK)
+                .match(ElectionFailed.class, this::onFailedACK)
+                .match(EndElectionFailed.class, this::onFailedEndElectionProcess)
+                .match(SendElectionList.class, this::onReceiveElectionList)
+                .match(EndElectionProcess.class, this::onEndElectionProcess)
+                .match(Heartbeat.class, )
+                //end heartbeat and elections
                 .build();
     }
 
