@@ -111,11 +111,20 @@ public class Replica extends AbstractReplica {
         }
     }
 
+    public static final class FailHeartbeat implements Serializable {
+    }
+
     public void onHeartbeat(Heartbeat a) {
         // need to reset heartbeat timer
 
         resetWatchdogTimer();
         // TODO: add reinitialization of heartbeat timer
+        this.watchdogTimer = getContext().getSystem().scheduler().scheduleOnce(
+                Duration.create(4L * getMaxLatency() + 8L * this.id * getMaxLatency(), TimeUnit.MILLISECONDS),
+                getSelf(),
+                new FailHeartbeat(),
+                getContext().getSystem().getDispatcher(),
+                getSelf());
     }
 
     // TODO: implements send election data to next hop and election ack as answer
@@ -132,6 +141,25 @@ public class Replica extends AbstractReplica {
             this.seqNum = seqnum;
         }
 
+    }
+
+    void startElectionProcesS(FailHeartbeat fail) {
+        int nextID = -1;
+
+        nextID = nextAliveIdInList(this.id);
+        int transactionID = (int)Math.random() * 503;
+        TreeMap<Integer, ActorRef> aliveNodes = new TreeMap<>();
+        aliveNodes.put(this.id, this.initialGroup.get(this.id));
+
+        SendElectionList message = new SendElectionList(nextID, aliveNodes, transactionID);
+        this.replicaElectionAwaitACKTimer = getContext().getSystem().scheduler().scheduleOnce(
+                Duration.create(4L * getMaxLatency(), TimeUnit.MILLISECONDS),
+                getSelf(),
+                new ElectionFailed(nextID, this.seqnum, message),
+                getContext().getSystem().getDispatcher(),
+                getSelf());
+
+        tell(message, this.initialGroup.get(nextID));
     }
 
     /*
