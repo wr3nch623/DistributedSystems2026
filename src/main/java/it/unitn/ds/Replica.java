@@ -22,6 +22,7 @@ import java.util.concurrent.TimeUnit;
 */
 
 public class Replica extends AbstractReplica {
+    ////track variables /////////////////////
     // Sequence number that is updated from the coordinator
     private int seqnum;
 
@@ -31,7 +32,7 @@ public class Replica extends AbstractReplica {
     private TreeMap<Integer, ActorRef> aliveGroup;
 
     // This is the alternative to aliveGroup
-    private ArrayList<Integer> ring;
+    private ArrayList<Integer> ring = new ArrayList<>(); //should this be initialized?
 
     // Here i know who is the coordinator and how many replicas are in the system
     // easily
@@ -59,6 +60,23 @@ public class Replica extends AbstractReplica {
     // Save what is the reason for the crash just for show and to keep track after
     // how many messages it should crash
     private Crash howCrash = null;
+
+
+    //////////////////////////////////////////////
+    
+    /////// BROADCAST STATE (replica s memory here) /////////////////////////////////
+
+    private final int[] positions = new int[POSITIONS_LIST_LENGTH];     // the actual data 
+    private int epoch = 0;          //coordinator epoch, incremented on each new coordinator
+    private int nextSeq = 0;        // ONLY used by coordinator, next sequence number to assign to the next update
+    private int nextToCommit = 0;   // ONLY used by coordinator, next sequence number to commit (i.e. send WriteOk to all replicas)
+    private final TreeMap<UpdateId, Update> pending = new TreeMap<>(); // received, not yet applied pending proposal for updates
+    private final TreeMap<UpdateId, Update> history = new TreeMap<>(); // applied updates, USEFUL FOR ELECTION
+    private final Map<UpdateId, Integer> ackCount = new HashMap<>();   // ONLY coordinator, ack counter for each update proposal
+
+    /////////////////////////////////////////////////////////////////////////////////////////////
+
+
 
     public Replica(int id) {
         this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY, AbstractReplica.COORDINATOR_BEAT_INTERVAL,
@@ -96,7 +114,7 @@ public class Replica extends AbstractReplica {
     }
 
     //
-    // HEARTBEAT AND ELECTION PROCESS
+    // HEARTBEAT AND ELECTION PROCESS ///////////////////////////////////////////////////////////////////////////
     //
 
     // Heartbeat that sends a message with sequence number (just cause, no real
@@ -397,12 +415,114 @@ public class Replica extends AbstractReplica {
     }
 
     //
-    // END HEARTBEAT AND ELECTION PROCESS
+    // END HEARTBEAT AND ELECTION PROCESS ////////////////////////////////////////////////////////////////////////////////
     //
 
     // Makes the replica not respondant to incoming messages
     // TODO: REMEMBER TO DESTROY THE TIMER(s) OTHERWISE IT WILL SEND HEARTBEAT OR DO
     // SOME WEIRD STUFF THAT WILL BE A PAIN TO DIAGNOSE
+
+
+
+
+
+
+    /////////BROADCAST PROTOCOL (reads, writes, UPDATE / ACK / WRITEOK)/////////////////////////////////////
+
+    /////Messages (immutable objects)///////
+    
+    public static final class UpdateId implements Serializable, Comparable<UpdateId> { //Identifies and update as epoque,seq
+        public final int epoch;
+        public final int seq;
+
+        public UpdateId(int epoch, int seq) {
+            this.epoch = epoch;
+            this.seq = seq;
+        }
+
+        @Override 
+        public int compareTo(UpdateId o) {
+            if (epoch != o.epoch) {
+                return Integer.compare(epoch, o.epoch);
+            }
+            return Integer.compare(seq, o.seq);
+        }
+
+        @Override 
+        public boolean equals (Object o) {
+            if(!(o instanceof UpdateId))
+                return false;
+            UpdateId u = (UpdateId) o;
+            return u.epoch == epoch && u.seq == seq;
+        }
+
+        @Override 
+        public int hashCode() {
+            return Objects.hash(epoch, seq);
+        }
+
+        @Override 
+        public String toString() {
+            return epoch + ":" + seq;
+        }
+    }
+
+    //Replica to coordinator (a client asked me to write)
+    public static final class ForwardedWrite implements Serializable {
+        public final int index;
+        public final int value;
+        public final ActorRef client;
+        public final int originReplica;
+
+        public ForwardedWrite(int index, int value, ActorRef client, int originReplica) {
+            this.index = index;
+            this.value = value;
+            this.client = client;
+            this.originReplica = originReplica;
+        }
+    }
+
+    //Coordinator to ALL replicas
+    public static final class Update implements Serializable {
+        public final UpdateId id;
+        public final int index;
+        public final int value;
+        public final ActorRef client;
+        public final int originReplica;
+
+        public Update(UpdateId id, int index, int value, ActorRef client, int originReplica) {
+            this.id = id;
+            this.index = index;
+            this.value = value;
+            this.client = client;
+            this.originReplica = originReplica;
+        }
+    }
+
+    //Replica to coordinator
+    public static final class Ack implements Serializable {
+        public final UpdateId id;
+
+        public Ack(UpdateId id) {
+            this.id = id;
+        }
+    }
+
+    //Coordinator to ALL replicas
+    public static final class WriteOk implements Serializable {
+        public final UpdateId id;
+
+        public WriteOk(UpdateId id) {
+            this.id = id;
+        }
+    }   
+
+    ///////Helpers//////////
+
+
+    ////////////////////////////////////////////////////////////////////
+
+
     public Receive hasCrashed() {
         return receiveBuilder()
                 .matchAny(msg -> {
