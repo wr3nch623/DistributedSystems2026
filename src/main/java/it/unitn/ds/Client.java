@@ -52,7 +52,7 @@ public class Client extends AbstractClient {
             this.index = index;
         }
     }**/
-// =======================Send Read/Write and more ==========================================================
+////////////////////////Send Read/Write and more ////////////////////////////////////////////////////////////////////
     @Override
     public void sendRead(ActorRef replica, int index) {
         // TODO: implement

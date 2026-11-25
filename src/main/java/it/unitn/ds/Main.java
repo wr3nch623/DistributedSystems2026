@@ -6,10 +6,12 @@ import java.util.Map;
 import akka.actor.ActorRef;
 import akka.actor.ActorSystem;
 import it.unitn.ds.AbstractReplica.InitSystem;
+//more imports
+import java.util.Optional;
 
 public class Main {
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws InterruptedException {   //throws InterruptedException because of Thread.sleep() calls
         System.out.println("========================================");
         System.out.println("START");
         System.out.println("========================================\n");
@@ -38,7 +40,18 @@ public class Main {
 
         // TODO: Create your clients
         
-        // TODO: Implement your main logic
+        // TODO: Implement your main logic///////////////////////////////////////////////
+
+        ActorRef client = system.actorOf(Client.props(1000,  2000, Optional.of(replicas.get(1))), "client_1"); //(x,y, ecc) x is timeout for read answer and y for write answer
+
+        Thread.sleep(500); //waiting for InitSystem to be processed by all replicas
+        client.tell(new AbstractClient.WriteRequest(0,42), ActorRef.noSender());
+        Thread.sleep(500);
+        client.tell(new AbstractClient.ReadRequest(0), ActorRef.noSender());
+        Thread.sleep(500);
+
+
+        //////////////////////////////////////////////////////////////////////////////////
 
         system.terminate();
 

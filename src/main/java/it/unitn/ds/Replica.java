@@ -517,9 +517,124 @@ public class Replica extends AbstractReplica {
         }
     }   
 
-    ///////Helpers//////////
+///////Helpers//////////
+    
+    private int quorum() {
+        return this.originalN / 2 + 1; //originalN is the number of replicas in the system, NOT THE ONES ALIVE, so that we can reach a quorum even if some replicas are down
+    }
+
+    private boolean isCoordinator() {  //CHECK if this replica is the coordinator, used to know if it should start the broadcast or just forward the write request to the coordinator
+        return this.id == this.coordinatorID;
+    }
+
+    //Client requests///////////////////
+
+    //Read: answered immediately from the local copy
+    private void onRead(AbstractClient.ReadRequest r) {
+        boolean ok = r.index >= 0 && r.index < positions.length; //From local memory
+        Integer val = ok ? Integer.valueOf(positions[r.index]) : null;
+        tell(new AbstractClient.ReadResult(ok, r.index, val, this.id), getSender());    //DANGER HERE: a read might not see a concurrent write that hasn't been applied yet 
+    }
+
+    //Write: the coordinator starts the broadcast, the others forward the request
+    private void onWrite(AbstractClient.WriteRequest w) {
+        if (isCoordinator()) {
+            startBroadcast(w.index, w.value, getSender(), this.id);
+        } else {
+            tell(new ForwardedWrite(w.index, w.value, getSender(), this.id),
+                    this.initialGroup.get(this.coordinatorID));
+            // TODO: start the timeout "coordinator did not broadcast the update"
+        }
+    }
+
+    private void onForwardedWrite(ForwardedWrite f) {   //When the write request is forwarded to the coordinator, it starts the broadcast
+        if (isCoordinator()) {
+            startBroadcast(f.index, f.value, f.client, f.originReplica);
+        }
+    }
+
+    //// Two-phase broadcast /////////////
+
+    // PHASE 1 (coordinator): send UPDATE to everyone
+    private void startBroadcast(int index, int value, ActorRef client, int origin) {
+        UpdateId uid = new UpdateId(this.epoch, this.nextSeq++);    //new updateID 
+        Update u = new Update(uid, index, value, client, origin);   //new update message
+
+        pending.put(uid, u);    //hold the update
+        ackCount.put(uid, 1); // the coordinator counts itself in the quorum
+
+        for (Map.Entry<Integer, ActorRef> e : aliveGroup.entrySet()) {
+            if (e.getKey() != this.id) {
+                tell(u, e.getValue());  //sent message to all alive replicas except itself
+            }
+        }
+    }
 
 
+
+    //PHASE 1 (replica): store the update as pending and ACK the coordinator
+    private void onUpdate(Update u) {
+        pending.put(u.id, u);   //store update
+        tell(new Ack(u.id), this.initialGroup.get(this.coordinatorID)); //ack with only updateID
+        //TODO: start the timeout "WRITEOK did not arrive"
+    }
+
+
+
+    //PHASE 2 (coordinator): when a quorum is reached, send WRITEOK in sequence order
+
+    private void onAck(Ack a) {
+        if (!pending.containsKey(a.id)) //TO AVOID applying an update that has already been applied (e.g. if a replica crashed and restarted, it might send an ACK for an update that has already been committed)
+            return; // already committed: ignore late ACKs
+        ackCount.merge(a.id, 1, Integer::sum);  //MERGE TO keep duplicates harmless
+
+        while (true) { //DISGUSTING I KNOW, used when there are more pending updates to process all in one go, in case a quorum is reached for more than one update
+            UpdateId next = new UpdateId(this.epoch, this.nextToCommit);
+            Integer c = ackCount.get(next);
+            if (c == null || c < quorum())  //STOP if no entry, NOT YET proposed or already committed
+                break;
+
+            Update u = pending.get(next);
+            for (Map.Entry<Integer, ActorRef> e : aliveGroup.entrySet()) {  //ask for WRITEOK
+                if (e.getKey() != this.id) {
+                    tell(new WriteOk(next), e.getValue());
+                }
+            }
+            applyUpdate(u); //LOCALLY
+            ackCount.remove(next);
+            this.nextToCommit++;
+        }
+    }
+
+    //PHASE 2 (replica): apply the update
+    private void onWriteOk(WriteOk w) {
+        Update u = pending.get(w.id);
+        if (u != null) {
+            applyUpdate(u);
+        }
+        // TODO: cancel the "WRITEOK did not arrive" timeout for w.id
+    }
+
+    //DATA GETS UPDATED HERE////
+    private void applyUpdate(Update u) {
+        if (history.containsKey(u.id))
+            return; // NEVER apply the same update twice
+
+        pending.remove(u.id);
+        positions[u.index] = u.value;
+        history.put(u.id, u);
+
+        log("applied update " + u.id + " (" + u.index + ", " + u.value + ")");
+        callbackOnUpdateApplied(u.index, u.value);
+
+        //Burocratic part: replica that received the client request tells the client
+        if (u.originReplica == this.id && u.client != null) {
+            tell(new AbstractClient.WriteResult(true, u.index, u.value, this.id), u.client);
+        }
+    }
+
+
+    ///////END BROADCAST PROTOCOL/////////////////////////////////////////////////////////////
     ////////////////////////////////////////////////////////////////////
 
 
@@ -590,9 +705,16 @@ public class Replica extends AbstractReplica {
     }
 
     @Override
-    public final Receive createReceive() {
+    public final Receive createReceive() {  //Fancy switch case that handles all the messages
         return createBaseReceiveBuilder()
-                // TODO add your message handlers here .match(, )
+                // TODO[DONE] add your message handlers here .match(, )
+                //////broadcast protocol //////
+                .match(AbstractClient.ReadRequest.class, this::onRead)
+                .match(AbstractClient.WriteRequest.class, this::onWrite)
+                .match(ForwardedWrite.class, this::onForwardedWrite)
+                .match(Update.class, this::onUpdate)
+                .match(Ack.class, this::onAck)
+                .match(WriteOk.class, this::onWriteOk)
                 // heartbeat and elections
                 .match(ElectionACK.class, this::onElectionACK)
                 .match(ElectionFailed.class, this::onFailedACK)
