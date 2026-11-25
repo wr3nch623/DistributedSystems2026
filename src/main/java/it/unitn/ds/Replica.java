@@ -479,7 +479,8 @@ public class Replica extends AbstractReplica {
                 .match(EndElectionFailed.class, this::onFailedEndElectionProcess)
                 .match(SendElectionList.class, this::onReceiveElectionList)
                 .match(EndElectionProcess.class, this::onEndElectionProcess)
-                .match(Heartbeat.class, )
+                .match(Heartbeat.class, this::onHeartbeat)
+                .match(FailHeartbeat.class, this::startElectionProcesS)
                 //end heartbeat and elections
                 .build();
     }
