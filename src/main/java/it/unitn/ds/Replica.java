@@ -22,7 +22,7 @@ import java.util.concurrent.TimeUnit;
 */
 
 public class Replica extends AbstractReplica {
-    ////track variables /////////////////////
+    //// track variables
     // Sequence number that is updated from the coordinator
     private int seqnum;
 
@@ -32,7 +32,7 @@ public class Replica extends AbstractReplica {
     private TreeMap<Integer, ActorRef> aliveGroup;
 
     // This is the alternative to aliveGroup
-    private ArrayList<Integer> ring = new ArrayList<>(); //should this be initialized?
+    private ArrayList<Integer> ring = new ArrayList<>(); // should this be initialized?
 
     // Here i know who is the coordinator and how many replicas are in the system
     // easily
@@ -61,22 +61,22 @@ public class Replica extends AbstractReplica {
     // how many messages it should crash
     private Crash howCrash = null;
 
+    ////////////////////////////////////////////
 
-    //////////////////////////////////////////////
-    
-    /////// BROADCAST STATE (replica s memory here) /////////////////////////////////
+    /////// BROADCAST STATE (replica s memory here)
 
-    private final int[] positions = new int[POSITIONS_LIST_LENGTH];     // the actual data 
-    private int epoch = 0;          //coordinator epoch, incremented on each new coordinator
-    private int nextSeq = 0;        // ONLY used by coordinator, next sequence number to assign to the next update
-    private int nextToCommit = 0;   // ONLY used by coordinator, next sequence number to commit (i.e. send WriteOk to all replicas)
-    private final TreeMap<UpdateId, Update> pending = new TreeMap<>(); // received, not yet applied pending proposal for updates
+    private final int[] positions = new int[POSITIONS_LIST_LENGTH]; // the actual data
+    private int epoch = 0; // coordinator epoch, incremented on each new coordinator
+    private int nextSeq = 0; // ONLY used by coordinator, next sequence number to assign to the next update
+    private int nextToCommit = 0; // ONLY used by coordinator, next sequence number to commit (i.e. send WriteOk
+                                  // to all replicas)
+    private final TreeMap<UpdateId, Update> pending = new TreeMap<>(); // received, not yet applied pending proposal for
+                                                                       // updates
     private final TreeMap<UpdateId, Update> history = new TreeMap<>(); // applied updates, USEFUL FOR ELECTION
-    private final Map<UpdateId, Integer> ackCount = new HashMap<>();   // ONLY coordinator, ack counter for each update proposal
+    private final Map<UpdateId, Integer> ackCount = new HashMap<>(); // ONLY coordinator, ack counter for each update
+                                                                     // proposal
 
-    /////////////////////////////////////////////////////////////////////////////////////////////
-
-
+    ///////////////////////////////////////////////////////////////////////////////////////////
 
     public Replica(int id) {
         this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY, AbstractReplica.COORDINATOR_BEAT_INTERVAL,
@@ -110,11 +110,12 @@ public class Replica extends AbstractReplica {
     @Override
     public int getSystemNumberOfActors() {
         // TODO: implement
-        return this.aliveGroup.size();
+        return this.n;
     }
 
     //
-    // HEARTBEAT AND ELECTION PROCESS ///////////////////////////////////////////////////////////////////////////
+    // HEARTBEAT AND ELECTION PROCESS
+    // ///////////////////////////////////////////////////////////////////////////
     //
 
     // Heartbeat that sends a message with sequence number (just cause, no real
@@ -135,14 +136,25 @@ public class Replica extends AbstractReplica {
     public void onHeartbeat(Heartbeat a) {
         // need to reset heartbeat timer
 
-        resetWatchdogTimer();
-        // TODO: add reinitialization of heartbeat timer
-        this.watchdogTimer = getContext().getSystem().scheduler().scheduleOnce(
-                Duration.create(4L * getMaxLatency() + 8L * this.id * getMaxLatency(), TimeUnit.MILLISECONDS),
-                getSelf(),
-                new FailHeartbeat(),
-                getContext().getSystem().getDispatcher(),
-                getSelf());
+        // if i'm the coordinator i need to send everyone the heartbeat.
+        if (this.id == a.senderID && isCoordinator()) {
+            Set<Map.Entry<Integer, ActorRef>> setAliveGroup = aliveGroup.entrySet();
+            // Heartbeat message
+            Heartbeat m = new Heartbeat(this.seqnum, this.id);
+
+            // Send everyone the heartbeat
+            for (Map.Entry<Integer, ActorRef> i : setAliveGroup) {
+                tell(m, i.getValue());
+            }
+
+            // resetting the clock since they are scheduled once
+            resetCoordinatorHearbeatTimer();
+            startCoordinatorHeartbeat();
+        } else {
+            // reset replica watchdogs timers. 
+            resetWatchdogTimer();
+            startWatchDogHeartbeat();
+        }
     }
 
     // TODO: implements send election data to next hop and election ack as answer
@@ -165,7 +177,7 @@ public class Replica extends AbstractReplica {
         int nextID = -1;
 
         nextID = nextAliveIdInList(this.id);
-        int transactionID = (int)Math.random() * 503;
+        int transactionID = (int) Math.random() * 503;
         TreeMap<Integer, ActorRef> aliveNodes = new TreeMap<>();
         aliveNodes.put(this.id, this.initialGroup.get(this.id));
 
@@ -415,23 +427,20 @@ public class Replica extends AbstractReplica {
     }
 
     //
-    // END HEARTBEAT AND ELECTION PROCESS ////////////////////////////////////////////////////////////////////////////////
+    // END HEARTBEAT AND ELECTION PROCESS
+    // ////////////////////////////////////////////////////////////////////////////////
     //
 
     // Makes the replica not respondant to incoming messages
     // TODO: REMEMBER TO DESTROY THE TIMER(s) OTHERWISE IT WILL SEND HEARTBEAT OR DO
     // SOME WEIRD STUFF THAT WILL BE A PAIN TO DIAGNOSE
 
+    ///////// BROADCAST PROTOCOL (reads, writes, UPDATE / ACK / WRITEOK)
 
+    ///// Messages (immutable objects)
 
-
-
-
-    /////////BROADCAST PROTOCOL (reads, writes, UPDATE / ACK / WRITEOK)/////////////////////////////////////
-
-    /////Messages (immutable objects)///////
-    
-    public static final class UpdateId implements Serializable, Comparable<UpdateId> { //Identifies and update as epoque,seq
+    public static final class UpdateId implements Serializable, Comparable<UpdateId> { // Identifies and update as
+                                                                                       // epoque,seq
         public final int epoch;
         public final int seq;
 
@@ -440,7 +449,7 @@ public class Replica extends AbstractReplica {
             this.seq = seq;
         }
 
-        @Override 
+        @Override
         public int compareTo(UpdateId o) {
             if (epoch != o.epoch) {
                 return Integer.compare(epoch, o.epoch);
@@ -448,26 +457,26 @@ public class Replica extends AbstractReplica {
             return Integer.compare(seq, o.seq);
         }
 
-        @Override 
-        public boolean equals (Object o) {
-            if(!(o instanceof UpdateId))
+        @Override
+        public boolean equals(Object o) {
+            if (!(o instanceof UpdateId))
                 return false;
             UpdateId u = (UpdateId) o;
             return u.epoch == epoch && u.seq == seq;
         }
 
-        @Override 
+        @Override
         public int hashCode() {
             return Objects.hash(epoch, seq);
         }
 
-        @Override 
+        @Override
         public String toString() {
             return epoch + ":" + seq;
         }
     }
 
-    //Replica to coordinator (a client asked me to write)
+    // Replica to coordinator (a client asked me to write)
     public static final class ForwardedWrite implements Serializable {
         public final int index;
         public final int value;
@@ -482,7 +491,7 @@ public class Replica extends AbstractReplica {
         }
     }
 
-    //Coordinator to ALL replicas
+    // Coordinator to ALL replicas
     public static final class Update implements Serializable {
         public final UpdateId id;
         public final int index;
@@ -499,7 +508,7 @@ public class Replica extends AbstractReplica {
         }
     }
 
-    //Replica to coordinator
+    // Replica to coordinator
     public static final class Ack implements Serializable {
         public final UpdateId id;
 
@@ -508,35 +517,39 @@ public class Replica extends AbstractReplica {
         }
     }
 
-    //Coordinator to ALL replicas
+    // Coordinator to ALL replicasq
     public static final class WriteOk implements Serializable {
         public final UpdateId id;
 
         public WriteOk(UpdateId id) {
             this.id = id;
         }
-    }   
-
-///////Helpers//////////
-    
-    private int quorum() {
-        return this.originalN / 2 + 1; //originalN is the number of replicas in the system, NOT THE ONES ALIVE, so that we can reach a quorum even if some replicas are down
     }
 
-    private boolean isCoordinator() {  //CHECK if this replica is the coordinator, used to know if it should start the broadcast or just forward the write request to the coordinator
+    ///////Helpers//////////
+
+    private int quorum() {
+        return this.originalN / 2 + 1; // originalN is the number of replicas in the system, NOT THE ONES ALIVE, so
+                                       // that we can reach a quorum even if some replicas are down
+    }
+
+    private boolean isCoordinator() { // CHECK if this replica is the coordinator, used to know if it should start the
+                                      // broadcast or just forward the write request to the coordinator
         return this.id == this.coordinatorID;
     }
 
-    //Client requests///////////////////
+    // Client requests///////////////////
 
-    //Read: answered immediately from the local copy
+    // Read: answered immediately from the local copy
     private void onRead(AbstractClient.ReadRequest r) {
-        boolean ok = r.index >= 0 && r.index < positions.length; //From local memory
+        boolean ok = r.index >= 0 && r.index < positions.length; // From local memory
         Integer val = ok ? Integer.valueOf(positions[r.index]) : null;
-        tell(new AbstractClient.ReadResult(ok, r.index, val, this.id), getSender());    //DANGER HERE: a read might not see a concurrent write that hasn't been applied yet 
+        tell(new AbstractClient.ReadResult(ok, r.index, val, this.id), getSender()); // DANGER HERE: a read might not
+                                                                                     // see a concurrent write that
+                                                                                     // hasn't been applied yet
     }
 
-    //Write: the coordinator starts the broadcast, the others forward the request
+    // Write: the coordinator starts the broadcast, the others forward the request
     private void onWrite(AbstractClient.WriteRequest w) {
         if (isCoordinator()) {
             startBroadcast(w.index, w.value, getSender(), this.id);
@@ -547,66 +560,67 @@ public class Replica extends AbstractReplica {
         }
     }
 
-    private void onForwardedWrite(ForwardedWrite f) {   //When the write request is forwarded to the coordinator, it starts the broadcast
+    private void onForwardedWrite(ForwardedWrite f) { // When the write request is forwarded to the coordinator, it
+                                                      // starts the broadcast
         if (isCoordinator()) {
             startBroadcast(f.index, f.value, f.client, f.originReplica);
         }
     }
 
-    //// Two-phase broadcast /////////////
+    //// Two-phase broadcast
 
     // PHASE 1 (coordinator): send UPDATE to everyone
     private void startBroadcast(int index, int value, ActorRef client, int origin) {
-        UpdateId uid = new UpdateId(this.epoch, this.nextSeq++);    //new updateID 
-        Update u = new Update(uid, index, value, client, origin);   //new update message
+        UpdateId uid = new UpdateId(this.epoch, this.nextSeq++); // new updateID
+        Update u = new Update(uid, index, value, client, origin); // new update message
 
-        pending.put(uid, u);    //hold the update
+        pending.put(uid, u); // hold the update
         ackCount.put(uid, 1); // the coordinator counts itself in the quorum
 
         for (Map.Entry<Integer, ActorRef> e : aliveGroup.entrySet()) {
             if (e.getKey() != this.id) {
-                tell(u, e.getValue());  //sent message to all alive replicas except itself
+                tell(u, e.getValue()); // sent message to all alive replicas except itself
             }
         }
     }
 
-
-
-    //PHASE 1 (replica): store the update as pending and ACK the coordinator
+    // PHASE 1 (replica): store the update as pending and ACK the coordinator
     private void onUpdate(Update u) {
-        pending.put(u.id, u);   //store update
-        tell(new Ack(u.id), this.initialGroup.get(this.coordinatorID)); //ack with only updateID
-        //TODO: start the timeout "WRITEOK did not arrive"
+        pending.put(u.id, u); // store update
+        tell(new Ack(u.id), this.initialGroup.get(this.coordinatorID)); // ack with only updateID
+        // TODO: start the timeout "WRITEOK did not arrive"
     }
 
-
-
-    //PHASE 2 (coordinator): when a quorum is reached, send WRITEOK in sequence order
+    // PHASE 2 (coordinator): when a quorum is reached, send WRITEOK in sequence
+    // order
 
     private void onAck(Ack a) {
-        if (!pending.containsKey(a.id)) //TO AVOID applying an update that has already been applied (e.g. if a replica crashed and restarted, it might send an ACK for an update that has already been committed)
+        if (!pending.containsKey(a.id)) // TO AVOID applying an update that has already been applied (e.g. if a replica
+                                        // crashed and restarted, it might send an ACK for an update that has already
+                                        // been committed)
             return; // already committed: ignore late ACKs
-        ackCount.merge(a.id, 1, Integer::sum);  //MERGE TO keep duplicates harmless
+        ackCount.merge(a.id, 1, Integer::sum); // MERGE TO keep duplicates harmless
 
-        while (true) { //DISGUSTING I KNOW, used when there are more pending updates to process all in one go, in case a quorum is reached for more than one update
+        while (true) { // DISGUSTING I KNOW, used when there are more pending updates to process all in
+                       // one go, in case a quorum is reached for more than one update
             UpdateId next = new UpdateId(this.epoch, this.nextToCommit);
             Integer c = ackCount.get(next);
-            if (c == null || c < quorum())  //STOP if no entry, NOT YET proposed or already committed
+            if (c == null || c < quorum()) // STOP if no entry, NOT YET proposed or already committed
                 break;
 
             Update u = pending.get(next);
-            for (Map.Entry<Integer, ActorRef> e : aliveGroup.entrySet()) {  //ask for WRITEOK
+            for (Map.Entry<Integer, ActorRef> e : aliveGroup.entrySet()) { // ask for WRITEOK
                 if (e.getKey() != this.id) {
                     tell(new WriteOk(next), e.getValue());
                 }
             }
-            applyUpdate(u); //LOCALLY
+            applyUpdate(u); // LOCALLY
             ackCount.remove(next);
             this.nextToCommit++;
         }
     }
 
-    //PHASE 2 (replica): apply the update
+    // PHASE 2 (replica): apply the update
     private void onWriteOk(WriteOk w) {
         Update u = pending.get(w.id);
         if (u != null) {
@@ -615,7 +629,7 @@ public class Replica extends AbstractReplica {
         // TODO: cancel the "WRITEOK did not arrive" timeout for w.id
     }
 
-    //DATA GETS UPDATED HERE////
+    // DATA GETS UPDATED HERE////
     private void applyUpdate(Update u) {
         if (history.containsKey(u.id))
             return; // NEVER apply the same update twice
@@ -627,18 +641,18 @@ public class Replica extends AbstractReplica {
         log("applied update " + u.id + " (" + u.index + ", " + u.value + ")");
         callbackOnUpdateApplied(u.index, u.value);
 
-        //Burocratic part: replica that received the client request tells the client
+        // Burocratic part: replica that received the client request tells the client
         if (u.originReplica == this.id && u.client != null) {
             tell(new AbstractClient.WriteResult(true, u.index, u.value, this.id), u.client);
         }
     }
 
-
-    ///////END BROADCAST PROTOCOL/////////////////////////////////////////////////////////////
+    /////// END
+    /// BROADCAST PROTOCOL/////////////////////////////////////////////////////////////
     ////////////////////////////////////////////////////////////////////
 
-
     public Receive hasCrashed() {
+        resetAllClocks();
         return receiveBuilder()
                 .matchAny(msg -> {
                 })
@@ -675,6 +689,24 @@ public class Replica extends AbstractReplica {
     // tell((Serializable) targetMessage, this.initialGroup.get(targetID));
     // }
 
+    public void startCoordinatorHeartbeat() {
+        this.coordinatorHeartbeatTimer = getContext().getSystem().scheduler().scheduleOnce(
+                Duration.create(1L * getMaxLatency(), TimeUnit.MILLISECONDS),
+                getSelf(),
+                new Heartbeat(this.seqnum, this.id),
+                getContext().getSystem().getDispatcher(),
+                getSelf());
+    }
+
+    public void startWatchDogHeartbeat() {
+        this.watchdogTimer = getContext().getSystem().scheduler().scheduleOnce(
+                Duration.create(4L * getMaxLatency() + 8L * this.id * getMaxLatency(), TimeUnit.MILLISECONDS),
+                getSelf(),
+                new FailHeartbeat(),
+                getContext().getSystem().getDispatcher(),
+                getSelf());
+    }
+
     @Override
     public void initSystem(InitSystem sysInit) {
         if (this.n > 0)
@@ -696,19 +728,18 @@ public class Replica extends AbstractReplica {
         seqnum = 0;
 
         if (this.coordinatorID == this.id) {
-            // TODO: Start coordinator heartbeat
+            startCoordinatorHeartbeat();
 
         }
 
-        // TODO: start replica heartbeat to check for other replicas.
-
+        startWatchDogHeartbeat();
     }
 
     @Override
-    public final Receive createReceive() {  //Fancy switch case that handles all the messages
+    public final Receive createReceive() { // Fancy switch case that handles all the messages
         return createBaseReceiveBuilder()
                 // TODO[DONE] add your message handlers here .match(, )
-                //////broadcast protocol //////
+                ////// broadcast protocol
                 .match(AbstractClient.ReadRequest.class, this::onRead)
                 .match(AbstractClient.WriteRequest.class, this::onWrite)
                 .match(ForwardedWrite.class, this::onForwardedWrite)
@@ -723,7 +754,7 @@ public class Replica extends AbstractReplica {
                 .match(EndElectionProcess.class, this::onEndElectionProcess)
                 .match(Heartbeat.class, this::onHeartbeat)
                 .match(FailHeartbeat.class, this::startElectionProcesS)
-                //end heartbeat and elections
+                // end heartbeat and elections
                 .build();
     }
 
