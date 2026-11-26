@@ -3,6 +3,7 @@ package it.unitn.ds;
 import akka.actor.ActorRef;
 import akka.actor.Cancellable;
 import akka.actor.Props;
+import it.unitn.ds.AbstractReplica.Crash;
 import it.unitn.ds.Replica.SendElectionList;
 import scala.annotation.nowarn;
 //import scala.collection.immutable.TreeMap;
@@ -40,6 +41,8 @@ public class Replica extends AbstractReplica {
     private int n;
     private int originalN;
 
+    private int numOfMessagesBeforeCrash;
+
     // I might not need it in the future, but probably its better to have it just in
     // case :)
     private boolean isCrashed;
@@ -54,6 +57,13 @@ public class Replica extends AbstractReplica {
     // other hop without problems
     private Cancellable replicaElectionAwaitACKTimer;
 
+    // response variables that are needed to check wheter the sender is the same we
+    // are awaiting for
+    // only the you should free the variable and cancel the electionACKTimer
+    private ElectionFailed waitForACK;
+    private EndElectionFailed waitForElectionFailed;
+    private FailHeartbeat waitForHeartbeat;
+
     // Super secret data that we must register or something
     private Map<Integer, String> data;
 
@@ -61,7 +71,7 @@ public class Replica extends AbstractReplica {
     // how many messages it should crash
     private Crash howCrash = null;
 
-    ////////////////////////////////////////////
+    //////////////////////////////////
 
     /////// BROADCAST STATE (replica s memory here)
 
@@ -76,7 +86,7 @@ public class Replica extends AbstractReplica {
     private final Map<UpdateId, Integer> ackCount = new HashMap<>(); // ONLY coordinator, ack counter for each update
                                                                      // proposal
 
-    ///////////////////////////////////////////////////////////////////////////////////////////
+    /////////////////////////////////////////////////////////////////////////////////
 
     public Replica(int id) {
         this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY, AbstractReplica.COORDINATOR_BEAT_INTERVAL,
@@ -134,6 +144,16 @@ public class Replica extends AbstractReplica {
     }
 
     public void onHeartbeat(Heartbeat a) {
+
+        // implement crash on heartbeat
+        if (this.howCrash != null && this.howCrash.type == Crash.Type.Heartbeat) {
+            if (this.numOfMessagesBeforeCrash == 0) {
+                getContext().become(hasCrashed());
+            } else {
+                this.numOfMessagesBeforeCrash -= 1;
+            }
+        }
+
         // need to reset heartbeat timer
 
         // if i'm the coordinator i need to send everyone the heartbeat.
@@ -144,14 +164,16 @@ public class Replica extends AbstractReplica {
 
             // Send everyone the heartbeat
             for (Map.Entry<Integer, ActorRef> i : setAliveGroup) {
-                tell(m, i.getValue());
+                if (i.getKey() != this.id)
+                    tell(m, i.getValue());
             }
 
             // resetting the clock since they are scheduled once
             resetCoordinatorHearbeatTimer();
             startCoordinatorHeartbeat();
-        } else {
-            // reset replica watchdogs timers. 
+        } else if (!isCoordinator() && a.senderID == this.coordinatorID
+                && getSender().equals(initialGroup.get(coordinatorID))) {
+            // reset replica watchdogs timers.
             resetWatchdogTimer();
             startWatchDogHeartbeat();
         }
@@ -163,29 +185,37 @@ public class Replica extends AbstractReplica {
         public final int initiator;
         public final TreeMap<Integer, ActorRef> aliveNodes;
         public final int seqNum;
+        public final int lastHopID;
 
-        public SendElectionList(int initiator, TreeMap<Integer, ActorRef> aliveNodes, int seqnum) {
+        public SendElectionList(int initiator, TreeMap<Integer, ActorRef> aliveNodes, int seqnum, int lastHopID) {
             this.aliveNodes = new TreeMap<>();
             this.initiator = initiator;
             this.aliveNodes.putAll(aliveNodes);
             this.seqNum = seqnum;
+            this.lastHopID = lastHopID;
         }
 
     }
 
-    void startElectionProcesS(FailHeartbeat fail) {
+    void startElectionProcess(FailHeartbeat fail) {
         int nextID = -1;
+        if (fail != this.waitForHeartbeat || isCoordinator())
+            return;
+        resetAllClocks();
 
         nextID = nextAliveIdInList(this.id);
-        int transactionID = (int) Math.random() * 503;
+        int transactionID = (int) (Math.random() * 503);
         TreeMap<Integer, ActorRef> aliveNodes = new TreeMap<>();
         aliveNodes.put(this.id, this.initialGroup.get(this.id));
+        SendElectionList message = new SendElectionList(this.id, aliveNodes, transactionID, -1);
 
-        SendElectionList message = new SendElectionList(nextID, aliveNodes, transactionID);
+        ElectionFailed failed = new ElectionFailed(nextID, this.seqnum, message);
+        callbackOnElectionStarted(this.coordinatorID);
+        this.waitForACK = failed;
         this.replicaElectionAwaitACKTimer = getContext().getSystem().scheduler().scheduleOnce(
                 Duration.create(4L * getMaxLatency(), TimeUnit.MILLISECONDS),
                 getSelf(),
-                new ElectionFailed(nextID, this.seqnum, message),
+                failed,
                 getContext().getSystem().getDispatcher(),
                 getSelf());
 
@@ -204,9 +234,11 @@ public class Replica extends AbstractReplica {
 
     public void onReceiveElectionList(SendElectionList list) {
         int nextID = -1;
+
         // int nextHopCounter = 1;
         if (list.initiator != this.id) {
-            resetAllClocks();
+            resetCoordinatorHearbeatTimer();
+            resetWatchdogTimer();
             // send election start message or election
             TreeMap<Integer, ActorRef> aliveNodes = list.aliveNodes;
             aliveNodes.put(this.id, this.initialGroup.get(this.id));
@@ -214,24 +246,37 @@ public class Replica extends AbstractReplica {
             if (nextID == -1) {
                 log(String.format("REPLICA %d, ERROR: nextID not found in aliveGROUP\n", this.id));
             }
-            SendElectionList message = new SendElectionList(nextID, aliveNodes, list.seqNum);
+            SendElectionList message = new SendElectionList(list.initiator, aliveNodes, list.seqNum, this.id);
+            ElectionFailed fail = new ElectionFailed(nextID, this.seqnum, message);
+            callbackOnElectionStarted(this.coordinatorID);
             this.replicaElectionAwaitACKTimer = getContext().getSystem().scheduler().scheduleOnce(
                     Duration.create(4L * getMaxLatency(), TimeUnit.MILLISECONDS),
                     getSelf(),
-                    new ElectionFailed(nextID, this.seqnum, message),
+                    fail,
                     getContext().getSystem().getDispatcher(),
                     getSelf());
 
+            this.waitForACK = fail;
+
             tell(message, this.initialGroup.get(nextID));
+
+            // If you never sends the ack it will always fail ffs
+            tell(new ElectionACK(this.id, list.seqNum), getSender());
             // TODO: check if this solution would work using the lists
         } else {
             // send finish election message
             this.aliveGroup = list.aliveNodes;
+
+            
+            // Get the node with highest ID which is gonna be the new coordinator
+            int maxReplica = list.aliveNodes.lastKey();
+
+            callbackOnCoordinatorElected(maxReplica);
             // TODO: remember to reinstantiate all clocks in the next message
 
             // Create the end election message with the new list and the new
             nextID = nextAliveIdInList(this.id);
-            EndElectionProcess finalMessage = new EndElectionProcess(list.seqNum, this.id, nextID, this.aliveGroup);
+            EndElectionProcess finalMessage = new EndElectionProcess(list.seqNum, this.id, maxReplica, this.aliveGroup);
             this.replicaElectionAwaitACKTimer = getContext().getSystem().scheduler().scheduleOnce(
                     Duration.create(4L * getMaxLatency(), TimeUnit.MILLISECONDS),
                     getSelf(),
@@ -240,12 +285,27 @@ public class Replica extends AbstractReplica {
                     getSelf());
 
             tell(finalMessage, this.initialGroup.get(nextID));
+            tell(new ElectionACK(this.id, list.seqNum), getSender());
+
+            if(this.id == maxReplica) {
+                startCoordinatorHeartbeat();
+            }
+            else{
+                startWatchDogHeartbeat();
+            }
 
         }
 
     }
 
     public static final class ElectionACK implements Serializable {
+        public final int senderID;
+        public final int attNum;
+
+        public ElectionACK(int senderID, int attNum) {
+            this.senderID = senderID;
+            this.attNum = attNum;
+        }
     }
 
     /*
@@ -277,15 +337,21 @@ public class Replica extends AbstractReplica {
          */
         int nextID = -1;
 
+        if (fail != this.waitForACK)
+            return;
+
         resetReplicaACKTimer();
 
         // Create the end election message with the new list and the new
         nextID = nextAliveIdInList(fail.targetID);
 
+        ElectionFailed failed = new ElectionFailed(nextID, this.seqnum, fail.list);
+        this.waitForACK = failed;
+
         this.replicaElectionAwaitACKTimer = getContext().getSystem().scheduler().scheduleOnce(
                 Duration.create(4L * getMaxLatency(), TimeUnit.MILLISECONDS),
                 getSelf(),
-                new ElectionFailed(nextID, this.seqnum, fail.list),
+                failed,
                 getContext().getSystem().getDispatcher(),
                 getSelf());
 
@@ -304,8 +370,10 @@ public class Replica extends AbstractReplica {
     // that bullies everyone
     // into accepting the new one
     public void onElectionACK(ElectionACK e) {
-        resetReplicaACKTimer();
-
+        if (e.senderID == this.waitForACK.targetID) {
+            resetReplicaACKTimer();
+            this.waitForACK = null;
+        }
     }
 
     public static final class EndElectionProcess implements Serializable {
@@ -328,6 +396,7 @@ public class Replica extends AbstractReplica {
         if (p.initiator != this.id) {
             this.aliveGroup = p.newAliveGroup;
             this.coordinatorID = p.newCoordinatorId;
+            callbackOnCoordinatorElected(this.coordinatorID);
 
             EndElectionProcess newMessage = new EndElectionProcess(p.seqNum, p.initiator, p.newCoordinatorId,
                     p.newAliveGroup);
@@ -341,6 +410,13 @@ public class Replica extends AbstractReplica {
                     getSelf());
 
             tell(newMessage, this.initialGroup.get(nextID));
+
+            if(this.coordinatorID == this.id){
+                startCoordinatorHeartbeat();
+            }
+            else {
+                startWatchDogHeartbeat();
+            }
 
         }
     }
@@ -399,23 +475,16 @@ public class Replica extends AbstractReplica {
             this.watchdogTimer.cancel();
             this.watchdogTimer = null;
         }
+        this.waitForHeartbeat = null;
+
     }
 
     private void resetAllClocks() {
-        if (this.watchdogTimer != null) {
-            this.watchdogTimer.cancel();
-            this.watchdogTimer = null;
-        }
+        resetWatchdogTimer();
 
-        if (this.coordinatorHeartbeatTimer != null) {
-            this.coordinatorHeartbeatTimer.cancel();
-            this.coordinatorHeartbeatTimer = null;
-        }
+        resetCoordinatorHearbeatTimer();
 
-        if (this.replicaElectionAwaitACKTimer != null) {
-            this.coordinatorHeartbeatTimer.cancel();
-            this.coordinatorHeartbeatTimer = null;
-        }
+        resetReplicaACKTimer();
 
     }
 
@@ -669,6 +738,8 @@ public class Replica extends AbstractReplica {
             getContext().become(hasCrashed());
         }
 
+        this.numOfMessagesBeforeCrash = how_to_crash.after_n_messages_of_type;
+
         // TODO: implement other types of crash inside other message receives.
 
     }
@@ -691,7 +762,7 @@ public class Replica extends AbstractReplica {
 
     public void startCoordinatorHeartbeat() {
         this.coordinatorHeartbeatTimer = getContext().getSystem().scheduler().scheduleOnce(
-                Duration.create(1L * getMaxLatency(), TimeUnit.MILLISECONDS),
+                Duration.create(1L * getCoordinatorBeatInterval(), TimeUnit.MILLISECONDS),
                 getSelf(),
                 new Heartbeat(this.seqnum, this.id),
                 getContext().getSystem().getDispatcher(),
@@ -699,10 +770,12 @@ public class Replica extends AbstractReplica {
     }
 
     public void startWatchDogHeartbeat() {
+        this.waitForHeartbeat = new FailHeartbeat();
         this.watchdogTimer = getContext().getSystem().scheduler().scheduleOnce(
-                Duration.create(4L * getMaxLatency() + 8L * this.id * getMaxLatency(), TimeUnit.MILLISECONDS),
+                Duration.create(3L * getCoordinatorBeatInterval() + 3L * this.id * getMaxLatencyPlusTolerance(),
+                        TimeUnit.MILLISECONDS),
                 getSelf(),
-                new FailHeartbeat(),
+                waitForHeartbeat,
                 getContext().getSystem().getDispatcher(),
                 getSelf());
     }
@@ -727,12 +800,13 @@ public class Replica extends AbstractReplica {
         this.coordinatorID = sysInit.coordinator_id;
         seqnum = 0;
 
+        // start coordinator heartbeat and replica's watchdog for coordinator.
         if (this.coordinatorID == this.id) {
             startCoordinatorHeartbeat();
 
+        } else {
+            startWatchDogHeartbeat();
         }
-
-        startWatchDogHeartbeat();
     }
 
     @Override
@@ -753,7 +827,7 @@ public class Replica extends AbstractReplica {
                 .match(SendElectionList.class, this::onReceiveElectionList)
                 .match(EndElectionProcess.class, this::onEndElectionProcess)
                 .match(Heartbeat.class, this::onHeartbeat)
-                .match(FailHeartbeat.class, this::startElectionProcesS)
+                .match(FailHeartbeat.class, this::startElectionProcess)
                 // end heartbeat and elections
                 .build();
     }
