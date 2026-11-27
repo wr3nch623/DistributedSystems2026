@@ -306,33 +306,40 @@ public class Replica extends AbstractReplica {
             tell(new ElectionACK(this.id, list.seqNum), getSender());
             // TODO: check if this solution would work using the lists
         } else {
-            // send finish election message
+            // // send finish election message
             this.aliveGroup = list.aliveNodes;
 
-            // Get the node with highest ID which is gonna be the new coordinator
+            // // Get the node with highest ID which is gonna be the new coordinator
             int maxReplica = list.aliveNodes.lastKey();
+            this.coordinatorID = maxReplica;
 
-            callbackOnCoordinatorElected(maxReplica);
-            // TODO: remember to reinstantiate all clocks in the next message
-
-            // Create the end election message with the new list and the new
-            nextID = nextAliveIdInList(this.id);
             EndElectionProcess finalMessage = new EndElectionProcess(list.seqNum, this.id, maxReplica, this.aliveGroup);
+
+            // // TODO: remember to reinstantiate all clocks in the next message
+
+            // // Create the end election message with the new list and the new
+            // nextID = nextAliveIdInList(this.id);
+            // EndElectionProcess finalMessage = new EndElectionProcess(list.seqNum, this.id, maxReplica, this.aliveGroup);
             this.replicaElectionAwaitACKTimer = getContext().getSystem().scheduler().scheduleOnce(
                     Duration.create(4L * getMaxLatency(), TimeUnit.MILLISECONDS),
                     getSelf(),
-                    new EndElectionFailed(nextID, this.seqnum, finalMessage),
+                    new EndElectionFailed(this.coordinatorID, this.seqnum, finalMessage),
                     getContext().getSystem().getDispatcher(),
                     getSelf());
 
-            tell(finalMessage, this.initialGroup.get(nextID));
-            tell(new ElectionACK(this.id, list.seqNum), getSender());
+            tell(finalMessage, this.initialGroup.get(this.coordinatorID));
 
-            if (this.id == maxReplica) {
-                startCoordinatorHeartbeat();
-            } else {
-                startWatchDogHeartbeat();
-            }
+
+            // tell(finalMessage, this.initialGroup.get(nextID));
+            // tell(new ElectionACK(this.id, list.seqNum), getSender());
+
+            // if (this.id == maxReplica) {
+            //     startCoordinatorHeartbeat();
+            // } else {
+            //     startWatchDogHeartbeat();
+            // }
+
+
 
         }
 
@@ -410,7 +417,7 @@ public class Replica extends AbstractReplica {
     // that bullies everyone
     // into accepting the new one
     public void onElectionACK(ElectionACK e) {
-        if (e.senderID == this.waitForACK.targetID) {
+        if (this.waitForACK != null && e.senderID == this.waitForACK.targetID) {
             resetReplicaACKTimer();
             this.waitForACK = null;
         }
@@ -431,35 +438,85 @@ public class Replica extends AbstractReplica {
         }
     }
 
-    public void onEndElectionProcess(EndElectionProcess p) {
-        int nextID = -1;
+    public static final class Synchronization implements Serializable{
+        public int newCoordinator;
+        public int seqNum;
+        public TreeMap<Integer, ActorRef> newAliveNodes;
+
+        public Synchronization(int newCoordinator, int seqNum, TreeMap<Integer, ActorRef> newAliveNodes){
+            this.newCoordinator = newCoordinator;
+            this.seqNum = seqNum;
+            this.newAliveNodes = new TreeMap<>();
+            this.newAliveNodes.putAll(newAliveNodes);
+        }
+    }
+
+    public void onCoordinatorSync(Synchronization sync){
+        this.seqnum = sync.seqNum;
         this.isInElection = false;
-        if (p.initiator != this.id) {
+        this.aliveGroup = sync.newAliveNodes;
+        this.coordinatorID = sync.newCoordinator;
+
+        callbackOnCoordinatorElected(this.coordinatorID);
+
+        startWatchDogHeartbeat();
+    }
+
+    public void onEndElectionProcess(EndElectionProcess p) {
+
+        this.isInElection = false;
+
+        if(this.id == p.newCoordinatorId){
+
+            this.coordinatorID = this.id;
             this.aliveGroup = p.newAliveGroup;
-            this.coordinatorID = p.newCoordinatorId;
-            callbackOnCoordinatorElected(this.coordinatorID);
 
-            EndElectionProcess newMessage = new EndElectionProcess(p.seqNum, p.initiator, p.newCoordinatorId,
-                    p.newAliveGroup);
-
-            nextID = nextAliveIdInList(this.id);
-            this.replicaElectionAwaitACKTimer = getContext().getSystem().scheduler().scheduleOnce(
-                    Duration.create(4L * getMaxLatency(), TimeUnit.MILLISECONDS),
-                    getSelf(),
-                    new EndElectionFailed(nextID, this.seqnum, newMessage),
-                    getContext().getSystem().getDispatcher(),
-                    getSelf());
-
-            tell(newMessage, this.initialGroup.get(nextID));
             tell(new ElectionACK(this.id, p.seqNum), getSender());
 
-            if (this.coordinatorID == this.id) {
-                startCoordinatorHeartbeat();
-            } else {
-                startWatchDogHeartbeat();
+            callbackOnCoordinatorElected(this.coordinatorID);
+            this.seqnum++;
+            Synchronization endMessage = new Synchronization(this.id, this.seqnum, aliveGroup);
+
+            for (Map.Entry<Integer, ActorRef> e : aliveGroup.entrySet()) {
+            if (e.getKey() != this.id) {
+                tell(endMessage, e.getValue()); // sent message to all alive replicas except itself
             }
 
+            startCoordinatorHeartbeat();
         }
+
+
+        }
+
+
+        // int nextID = -1;
+        // this.isInElection = false;
+        // if (p.initiator != this.id) {
+        //     this.aliveGroup = p.newAliveGroup;
+        //     this.coordinatorID = p.newCoordinatorId;
+        //     callbackOnCoordinatorElected(this.coordinatorID);
+
+        //     EndElectionProcess newMessage = new EndElectionProcess(p.seqNum, p.initiator, p.newCoordinatorId,
+        //             p.newAliveGroup);
+
+        //     nextID = nextAliveIdInList(this.id);
+        //     this.replicaElectionAwaitACKTimer = getContext().getSystem().scheduler().scheduleOnce(
+        //             Duration.create(4L * getMaxLatency(), TimeUnit.MILLISECONDS),
+        //             getSelf(),
+        //             new EndElectionFailed(nextID, this.seqnum, newMessage),
+        //             getContext().getSystem().getDispatcher(),
+        //             getSelf());
+
+        //     tell(newMessage, this.initialGroup.get(nextID));
+        //     tell(new ElectionACK(this.id, p.seqNum), getSender());
+
+        //     if (this.coordinatorID == this.id) {
+        //         startCoordinatorHeartbeat();
+        //     } else {
+        //         startWatchDogHeartbeat();
+        //     }
+
+        // }
     }
 
     public static final class EndElectionFailed implements Serializable {
@@ -475,24 +532,31 @@ public class Replica extends AbstractReplica {
     }
 
     public void onFailedEndElectionProcess(EndElectionFailed fail) {
-        int nextID = -1;
+        // int nextID = -1;
 
-        resetReplicaACKTimer();
+        // resetReplicaACKTimer();
 
-        nextID = nextAliveIdInList(fail.targetID);
+        // nextID = nextAliveIdInList(fail.targetID);
 
-        EndElectionProcess newMessage = new EndElectionProcess(fail.list.seqNum, fail.list.initiator,
-                fail.list.newCoordinatorId,
-                fail.list.newAliveGroup);
+        // EndElectionProcess newMessage = new EndElectionProcess(fail.list.seqNum, fail.list.initiator,
+        //         fail.list.newCoordinatorId,
+        //         fail.list.newAliveGroup);
+
+        // this.replicaElectionAwaitACKTimer = getContext().getSystem().scheduler().scheduleOnce(
+        //         Duration.create(4L * getMaxLatency(), TimeUnit.MILLISECONDS),
+        //         getSelf(),
+        //         new EndElectionFailed(nextID, this.seqnum, newMessage),
+        //         getContext().getSystem().getDispatcher(),
+        //         getSelf());
+
+        // tell(newMessage, this.initialGroup.get(nextID));
 
         this.replicaElectionAwaitACKTimer = getContext().getSystem().scheduler().scheduleOnce(
-                Duration.create(4L * getMaxLatency(), TimeUnit.MILLISECONDS),
+                Duration.create(0, TimeUnit.MILLISECONDS),
                 getSelf(),
-                new EndElectionFailed(nextID, this.seqnum, newMessage),
+                new FailHeartbeat(),
                 getContext().getSystem().getDispatcher(),
                 getSelf());
-
-        tell(newMessage, this.initialGroup.get(nextID));
 
     }
 
@@ -869,6 +933,7 @@ public class Replica extends AbstractReplica {
                 .match(EndElectionProcess.class, this::onEndElectionProcess)
                 .match(Heartbeat.class, this::onHeartbeat)
                 .match(FailHeartbeat.class, this::startElectionProcess)
+                .match(Synchronization.class, this::onCoordinatorSync)
                 // end heartbeat and elections
                 .build();
     }
